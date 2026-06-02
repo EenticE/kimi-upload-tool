@@ -8,8 +8,7 @@ const { uploadFile } = require('../lib/api');
 
 async function upload(sourcePath, options) {
   if (!sourcePath) {
-    console.error('❌ 请指定源文件路径');
-    console.error('用法: node kimi_file.js upload <文件路径> [选项]');
+    console.error('❌ 请指定源文件路径\n用法: node kimi_file.js upload <文件路径> [选项]');
     process.exit(1);
   }
   if (!fs.existsSync(sourcePath)) {
@@ -35,76 +34,74 @@ async function upload(sourcePath, options) {
   }
   if (!token) { progress.summary('上传失败', ['无法获取认证 token']); process.exit(1); }
 
-  // 2. Check for existing upload dirs (resume)
-  let uploadDir;
-  let chunksDir;
-  let progressFile;
-  let signUrlFile;
+  // 2. Check for resume
+  let uploadDir, chunksDir, progressFile, signUrlFile;
   const chunkSize = options.chunkSize || config.DEFAULT_CHUNK_SIZE;
-
   const uploadsBase = path.join(config.CACHE_DIR, 'uploads');
   let existingDir = null;
   if (fs.existsSync(uploadsBase)) {
     const candidates = fs.readdirSync(uploadsBase)
       .filter(d => d.startsWith(sourceName))
       .map(d => path.join(uploadsBase, d))
-      .sort()
-      .reverse();
+      .sort().reverse();
     for (const dir of candidates) {
-      if (fs.existsSync(path.join(dir, 'progress.json'))) {
-        existingDir = dir;
-        break;
-      }
+      if (fs.existsSync(path.join(dir, 'progress.json'))) { existingDir = dir; break; }
     }
   }
 
-  // 3. Setup paths and split/resume
+  // 3. Split / resume
   progress.setStage('分片中', '📦');
-  let chunkNames = [];
-  let chunkStatus = {};
+  let chunkNames = [], chunkStatus = {};
 
   if (existingDir) {
-    // Resume: reuse existing dir
     uploadDir = existingDir;
     chunksDir = path.join(uploadDir, 'chunks');
     progressFile = path.join(uploadDir, 'progress.json');
     signUrlFile = path.join(uploadDir, config.signUrlFilename(sourceName));
-
     const saved = JSON.parse(fs.readFileSync(progressFile, 'utf-8'));
     const doneCount = Object.values(saved.chunks).filter(c => c.status === 'done').length;
-    progress.log(`📋 发现断点，${doneCount}/${saved.totalChunks} 已上传`);
+    const firstPending = Object.entries(saved.chunks).find(([, s]) => s.status !== 'done');
+    progress.log(`📋 发现断点: ${doneCount}/${saved.totalChunks} 已完成，跳过`);
+    if (firstPending) progress.log(`📋 从 ${firstPending[0]} 开始续传`);
     chunkStatus = saved.chunks;
     chunkNames = Object.keys(chunkStatus);
-
-    // Ensure chunks dir exists
     fs.mkdirSync(chunksDir, { recursive: true });
+
+    // Check if missing chunks need to be re-created
+    const missingChunks = Object.entries(saved.chunks)
+      .filter(([, s]) => s.status !== 'done')
+      .some(([name]) => !fs.existsSync(path.join(chunksDir, name)));
+    if (missingChunks) {
+      progress.log(`📋 分片文件缺失，自动重新分片...`);
+      await splitFile(sourcePath, chunkSize, chunksDir, progress);
+    }
     await new Promise(r => setTimeout(r, 1000));
   } else {
-    // Fresh upload: create new dir
     uploadDir = config.uploadCacheDir(sourceName);
     chunksDir = path.join(uploadDir, 'chunks');
     progressFile = path.join(uploadDir, 'progress.json');
     signUrlFile = path.join(uploadDir, config.signUrlFilename(sourceName));
     fs.mkdirSync(chunksDir, { recursive: true });
-
     const splitResult = await splitFile(sourcePath, chunkSize, chunksDir, progress);
     chunkNames = splitResult.map(c => c.name);
     for (const c of splitResult) chunkStatus[c.name] = { status: 'pending', size: c.size };
-    fs.writeFileSync(
-      progressFile,
-      JSON.stringify({ sourceFile: sourceName, totalChunks: chunkNames.length, chunks: chunkStatus, createdAt: new Date().toISOString() }, null, 2)
-    );
+    fs.writeFileSync(progressFile, JSON.stringify(
+      { sourceFile: sourceName, totalChunks: chunkNames.length, chunks: chunkStatus, createdAt: new Date().toISOString() }, null, 2
+    ));
   }
 
-  // 4. Upload
+  // 4. Producer-consumer upload
   progress.setStage('上传中', '☁️');
   const total = chunkNames.length;
   const concurrency = options.concurrency || config.DEFAULT_CONCURRENCY;
   const retry = options.retry || config.DEFAULT_RETRY;
   let allDone = Object.values(chunkStatus).filter(c => c.status === 'done').length;
   let startTime = Date.now();
-  const uploadedUrls = chunkNames.filter(n => chunkStatus[n].status === 'done' && chunkStatus[n].signUrl).map(n => chunkStatus[n].signUrl);
-
+  let lastProgressUpdate = 0;
+  const signUrlMap = {}; // name -> signUrl
+  for (const n of chunkNames) {
+    if (chunkStatus[n].status === 'done' && chunkStatus[n].signUrl) signUrlMap[n] = chunkStatus[n].signUrl;
+  }
   const pending = chunkNames.filter(n => chunkStatus[n].status !== 'done');
 
   async function uploadOne(name) {
@@ -131,32 +128,46 @@ async function upload(sourcePath, options) {
     return null;
   }
 
-  // Batch upload
-  for (let i = 0; i < pending.length; i += concurrency) {
-    const batch = pending.slice(i, i + concurrency);
-    const batchResults = await Promise.all(batch.map(name => uploadOne(name)));
-    for (const r of batchResults) {
-      if (r) {
-        allDone++;
-        uploadedUrls.push(r.signUrl);
-        const pct = (allDone / total) * 100;
-        const elapsed = (Date.now() - startTime) / 1000;
-        const speed = elapsed > 0 ? (allDone * chunkSize / 1024 / 1024 / elapsed) : 0;
-        const eta = speed > 0 ? Math.round((total - allDone) * chunkSize / 1024 / 1024 / speed) : '?';
-        progress.update(pct, `${allDone} / ${total}  (${Math.round(pct)}%)`, `速度: ${speed.toFixed(1)} MB/s  预计剩余: ${eta}s`);
+  // Producer-consumer queue
+  const queue = [...pending];
+  let active = 0;
+  await new Promise(resolve => {
+    function next() {
+      while (active < concurrency && queue.length > 0) {
+        const chunk = queue.shift();
+        active++;
+        uploadOne(chunk).then(r => {
+          active--;
+          if (r) {
+            allDone++;
+            signUrlMap[r.name] = r.signUrl;
+            const now = Date.now();
+            if (now - lastProgressUpdate > 200 || allDone === total) {
+              lastProgressUpdate = now;
+              const pct = (allDone / total) * 100;
+              const elapsed = (now - startTime) / 1000;
+              const speed = elapsed > 0 ? (allDone * chunkSize / 1024 / 1024 / elapsed) : 0;
+              const eta = speed > 0 ? Math.round((total - allDone) * chunkSize / 1024 / 1024 / speed) : '?';
+              progress.update(pct, `${allDone} / ${total}  (${Math.round(pct)}%)`, `速度: ${speed.toFixed(1)} MB/s  预计剩余: ${eta}s`);
+            }
+          }
+          next();
+        });
       }
+      if (active === 0 && queue.length === 0) resolve();
     }
-    const ok = batchResults.filter(Boolean).length;
-    if (batchResults.length - ok > 0) progress.log(`  ⚡ 批次: ${ok} 成功, ${batchResults.length - ok} 失败`);
-  }
+    next();
+  });
 
   progress.done();
-
   if (allDone === 0) { progress.summary('上传失败', ['所有分片上传失败']); process.exit(1); }
 
   // 5. Save signUrl JSON
-  const fp = JSON.parse(fs.readFileSync(progressFile, 'utf-8'));
-  const allChunks = chunkNames.map(n => ({ name: n, size: fp.chunks[n]?.size || 0, signUrl: fp.chunks[n]?.signUrl || '' }));
+  const allChunks = chunkNames.map(n => ({
+    name: n,
+    size: chunkStatus[n]?.size || 0,
+    signUrl: signUrlMap[n] || '',
+  }));
   fs.writeFileSync(signUrlFile, JSON.stringify({ sourceFile: sourceName, sourceSize, createdAt: new Date().toISOString(), chunks: allChunks }, null, 2));
 
   // 6. Cleanup
