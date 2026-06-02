@@ -20,24 +20,32 @@ async function download(signUrlPath, options) {
   const { sourceFile, sourceSize, chunks } = manifest;
   const total = chunks.length;
 
-  // 1. Verify signUrls
-  progress.setStage('验证链接', '🔍');
-  const validChunks = [];
-  for (let i = 0; i < chunks.length; i++) {
-    const c = chunks[i];
-    progress.update(((i + 1) / total) * 100, `${i + 1} / ${total}`);
-    const valid = await checkUrl(c.signUrl);
-    if (valid) validChunks.push(c);
-    else progress.log(`⚠️ 链接失效: ${c.name}`);
+  // 1. Verify signUrls (skip if --force)
+  let validChunks;
+  if (options.force) {
+    progress.setStage('跳过验证', '⚠️');
+    progress.update(100, '--force 模式，跳过链接验证');
+    progress.done();
+    validChunks = [...chunks];
+  } else {
+    progress.setStage('验证链接', '🔍');
+    validChunks = [];
+    for (let i = 0; i < chunks.length; i++) {
+      const c = chunks[i];
+      progress.update(((i + 1) / total) * 100, `${i + 1} / ${total}`);
+      const valid = await checkUrl(c.signUrl);
+      if (valid) validChunks.push(c);
+      else progress.log(`⚠️ 链接失效: ${c.name}`);
+    }
+    if (validChunks.length === 0) {
+      progress.summary('下载失败', ['所有下载链接均无效，请重新 login 后重试']);
+      process.exit(1);
+    }
+    if (validChunks.length < total) {
+      progress.log(`⚠️ ${total - validChunks.length} 个链接无效，将下载 ${validChunks.length} 个`);
+    }
+    progress.done();
   }
-  if (validChunks.length === 0) {
-    progress.summary('下载失败', ['所有下载链接均无效，请重新 login 后重试']);
-    process.exit(1);
-  }
-  if (validChunks.length < total) {
-    progress.log(`⚠️ ${total - validChunks.length} 个链接无效，将下载 ${validChunks.length} 个`);
-  }
-  progress.done();
 
   // 2. Setup dirs + resume check
   let outputDir, downloadDir, progressFile;

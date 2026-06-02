@@ -24,6 +24,7 @@ Kimi 文件上传下载工具
   -o, --output <文件>        输出文件路径 (默认自动)
   --concurrency <数字>       下载并发数 (默认 3)
   --session-dir <目录>       session 目录 (默认 ./kimi_session)
+  --force                    跳过 signUrl 验证，直接下载
 `;
 
 function parseArgs() {
@@ -53,10 +54,10 @@ function parseArgs() {
       const match = val.match(/^(\d+)([mk]?b?)$/i);
       if (match) {
         const num = parseInt(match[1]);
-        const unit = match[2].toLowerCase();
+        const unit = (match[2] || '').toLowerCase();
         if (unit === 'm' || unit === 'mb') options.chunkSize = num * 1024 * 1024;
         else if (unit === 'k' || unit === 'kb') options.chunkSize = num * 1024;
-        else options.chunkSize = num;
+        else options.chunkSize = num * 1024 * 1024; // default to MB
       } else {
         options.chunkSize = parseInt(val) || 45 * 1024 * 1024;
       }
@@ -66,6 +67,8 @@ function parseArgs() {
       options.retry = parseInt(args[++i]) || 3;
     } else if (arg === '-o' || arg === '--output') {
       options.output = args[++i];
+    } else if (arg === '--force') {
+      options.force = true;
     } else if (!arg.startsWith('-')) {
       positional.push(arg);
     }
