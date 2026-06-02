@@ -1,0 +1,16 @@
+# Node
+node_modules/
+package-lock.json
+
+# Kimi session (browser data)
+kimi_session/
+
+# Cache (chunks, progress, tokens)
+.kimi_cache/
+
+# Test files
+*.bin
+
+# OS
+.DS_Store
+Thumbs.db
