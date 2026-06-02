@@ -25,6 +25,7 @@ Kimi 文件上传下载工具
   --concurrency <数字>       下载并发数 (默认 3)
   --session-dir <目录>       session 目录 (默认 ./kimi_session)
   --force                    跳过 signUrl 验证，直接下载
+  --curl                     使用系统 curl.exe 下载 (解决内网 TLS 指纹拦截)
 `;
 
 function parseArgs() {
@@ -69,6 +70,8 @@ function parseArgs() {
       options.output = args[++i];
     } else if (arg === '--force') {
       options.force = true;
+    } else if (arg === '--curl') {
+      options.curl = true;
     } else if (!arg.startsWith('-')) {
       positional.push(arg);
     }

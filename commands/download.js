@@ -3,7 +3,7 @@ const path = require('path');
 const config = require('../lib/config');
 const ProgressUI = require('../lib/progress');
 const { mergeChunks } = require('../lib/splitter');
-const { checkUrl, downloadFile } = require('../lib/api');
+const { checkUrl, downloadFile, downloadWithCurl } = require('../lib/api');
 
 async function download(signUrlPath, options) {
   if (!signUrlPath) {
@@ -128,7 +128,8 @@ async function download(signUrlPath, options) {
     }
 
     try {
-      const bytes = await downloadFile(chunk.signUrl, localPath);
+      const downloadFn = options.curl ? downloadWithCurl : downloadFile;
+      const bytes = await downloadFn(chunk.signUrl, localPath);
       const saved = JSON.parse(fs.readFileSync(progressFile, 'utf-8'));
       saved.chunks[chunk.name] = { status: 'done', size: chunk.size };
       fs.writeFileSync(progressFile, JSON.stringify(saved, null, 2));

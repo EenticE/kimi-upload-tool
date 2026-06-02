@@ -14,3 +14,9 @@ kimi_session/
 # OS
 .DS_Store
 Thumbs.db
+
+# IDE
+.idea/
+
+# Test artifacts
+test/
