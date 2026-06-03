@@ -3,6 +3,7 @@ const commands = {
   login: require('./commands/login'),
   upload: require('./commands/upload'),
   download: require('./commands/download'),
+  zzzz
 };
 
 const helpText = `
